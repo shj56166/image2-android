@@ -1,0 +1,6 @@
+# Copy this file to release-signing.properties and keep the real file private.
+# The keystore should live outside the repository.
+storeFile=C:/Users/shj56/.android/image2-release.jks
+storePassword=change-this-password
+keyAlias=image2
+keyPassword=change-this-password
