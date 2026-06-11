@@ -8,18 +8,19 @@ import android.net.Uri
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Base64
+import androidx.core.content.FileProvider
 import com.shj56166androidimage2.app.R
 import com.shj56166androidimage2.app.data.db.ImageAssetDao
 import com.shj56166androidimage2.app.data.model.ImageSource
 import com.shj56166androidimage2.app.data.model.StoredImageAsset
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
-import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 private const val MASK_WORKING_MAX_EDGE = 1920
 private const val MASK_WORKING_DIMENSION_MULTIPLE = 16
@@ -37,6 +38,11 @@ data class PreparedMaskTarget(
     val originalHeight: Int,
     val wasConvertedToPng: Boolean,
     val wasResized: Boolean,
+)
+
+data class ShareableImageAsset(
+    val uri: Uri,
+    val mimeType: String,
 )
 
 class ImageStorageRepository(
@@ -184,6 +190,16 @@ class ImageStorageRepository(
             resolver.delete(uri, null, null)
             throw throwable
         }
+    }
+
+    suspend fun getShareableImage(id: String): ShareableImageAsset = withContext(Dispatchers.IO) {
+        val asset = dao.getById(id)?.toModel() ?: error(context.getString(R.string.image_not_found_for_share))
+        val file = File(asset.filePath)
+        if (!file.exists()) error(context.getString(R.string.image_file_missing_for_share))
+        ShareableImageAsset(
+            uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file),
+            mimeType = asset.mimeType,
+        )
     }
 
     private fun createThumbnail(bytes: ByteArray, extension: String, sha: String): File? {

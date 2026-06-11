@@ -37,14 +37,17 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -52,6 +55,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.shj56166androidimage2.app.R
+import com.shj56166androidimage2.app.data.network.profileTestCombinationLabel
 import com.shj56166androidimage2.app.data.model.ApiMode
 import com.shj56166androidimage2.app.data.model.AppLanguage
 import com.shj56166androidimage2.app.data.model.ApiProfile
@@ -59,7 +63,9 @@ import com.shj56166androidimage2.app.data.model.AppSettingsState
 import com.shj56166androidimage2.app.data.model.CustomProviderDefinition
 import com.shj56166androidimage2.app.data.repo.AppJson
 import com.shj56166androidimage2.app.ui.MainUiState
+import com.shj56166androidimage2.app.ui.ProfileConnectionTestState
 import com.shj56166androidimage2.app.ui.SettingsSubpage
+import kotlinx.coroutines.delay
 import kotlinx.serialization.encodeToString
 
 private data class ApiModeOption(
@@ -85,12 +91,6 @@ private val appLanguageOptions =
         AppLanguageOption(AppLanguage.SIMPLIFIED_CHINESE, R.string.language_option_simplified_chinese),
         AppLanguageOption(AppLanguage.TRADITIONAL_CHINESE, R.string.language_option_traditional_chinese),
     )
-
-private data class NewProfileDraft(
-    val name: String = "",
-    val baseUrl: String = "",
-    val apiKey: String = "",
-)
 
 @Composable
 fun SettingsScreen(
@@ -232,11 +232,14 @@ fun SettingsProfilesScreen(
     state: MainUiState,
     padding: PaddingValues,
     onUpdateProfile: (ApiProfile) -> Unit,
-    onCreateProfile: (String, String, String) -> Unit,
+    onCreateProfile: (CreateProfileDraft) -> Unit,
     onSetActiveProfile: (String) -> Unit,
     onDuplicateProfile: (String) -> Unit,
     onDeleteProfile: (String) -> Unit,
     onMoveProfile: (String, Int) -> Unit,
+    onTestProfileConnection: (String) -> Unit,
+    onTestCreateProfileDraft: (CreateProfileDraft) -> Unit,
+    onResetCreateProfileTest: () -> Unit,
 ) {
     val settings = state.settings ?: return
     val activeProfile = settings.profiles.firstOrNull { it.id == settings.activeProfileId }
@@ -244,7 +247,17 @@ fun SettingsProfilesScreen(
         mutableStateOf(settings.activeProfileId)
     }
     var showCreateProfileDialog by rememberSaveable { mutableStateOf(false) }
-    var newProfileDraft by remember { mutableStateOf(NewProfileDraft()) }
+    var showCreateProfileTestConfirmation by rememberSaveable { mutableStateOf(false) }
+    var newProfileDraft by remember { mutableStateOf(CreateProfileDraft()) }
+    val createProfileTestState = state.createProfileTestState
+
+    LaunchedEffect(showCreateProfileDialog, createProfileTestState.recommendedCombination) {
+        if (showCreateProfileDialog) {
+            createProfileTestState.recommendedCombination?.let { combination ->
+                newProfileDraft = newProfileDraft.applyCombination(combination)
+            }
+        }
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize().padding(padding).testTag("settings_profiles_screen"),
@@ -256,7 +269,8 @@ fun SettingsProfilesScreen(
                 settings = settings,
                 activeProfile = activeProfile,
                 onCreateProfile = {
-                    newProfileDraft = NewProfileDraft()
+                    newProfileDraft = CreateProfileDraft()
+                    onResetCreateProfileTest()
                     showCreateProfileDialog = true
                 },
             )
@@ -282,14 +296,22 @@ fun SettingsProfilesScreen(
                 onDuplicateProfile = onDuplicateProfile,
                 onDeleteProfile = onDeleteProfile,
                 onMoveProfile = onMoveProfile,
+                connectionTestState = state.profileConnectionStates[profile.id],
+                onTestProfileConnection = onTestProfileConnection,
             )
         }
     }
 
     if (showCreateProfileDialog) {
-        val canConfirm = newProfileDraft.baseUrl.isNotBlank() && newProfileDraft.apiKey.isNotBlank()
+        val canConfirm =
+            newProfileDraft.baseUrl.isNotBlank() &&
+                newProfileDraft.apiKey.isNotBlank()
         AlertDialog(
-            onDismissRequest = { showCreateProfileDialog = false },
+            onDismissRequest = {
+                showCreateProfileDialog = false
+                showCreateProfileTestConfirmation = false
+                onResetCreateProfileTest()
+            },
             confirmButton = {
                 TextButton(
                     enabled = canConfirm,
@@ -297,22 +319,40 @@ fun SettingsProfilesScreen(
                     onClick = {
                         expandedProfileId = ""
                         showCreateProfileDialog = false
-                        onCreateProfile(
-                            newProfileDraft.name,
-                            newProfileDraft.baseUrl,
-                            newProfileDraft.apiKey,
-                        )
+                        showCreateProfileTestConfirmation = false
+                        onCreateProfile(newProfileDraft)
                     },
                 ) {
                     Text(stringResource(R.string.dialog_ok))
                 }
             },
             dismissButton = {
-                TextButton(
-                    modifier = Modifier.testTag("settings_create_profile_cancel"),
-                    onClick = { showCreateProfileDialog = false },
-                ) {
-                    Text(stringResource(R.string.cancel_action))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(
+                        enabled = newProfileDraft.baseUrl.isNotBlank() && newProfileDraft.apiKey.isNotBlank() && !createProfileTestState.isRunning,
+                        modifier = Modifier.testTag("settings_create_profile_test"),
+                        onClick = { showCreateProfileTestConfirmation = true },
+                    ) {
+                        Text(
+                            stringResource(
+                                if (createProfileTestState.isRunning) {
+                                    R.string.profile_test_running_action
+                                } else {
+                                    R.string.profile_test_start_action
+                                },
+                            ),
+                        )
+                    }
+                    TextButton(
+                        modifier = Modifier.testTag("settings_create_profile_cancel"),
+                        onClick = {
+                            showCreateProfileDialog = false
+                            showCreateProfileTestConfirmation = false
+                            onResetCreateProfileTest()
+                        },
+                    ) {
+                        Text(stringResource(R.string.cancel_action))
+                    }
                 }
             },
             title = { Text(stringResource(R.string.new_profile)) },
@@ -326,19 +366,106 @@ fun SettingsProfilesScreen(
                     )
                     OutlinedTextField(
                         value = newProfileDraft.baseUrl,
-                        onValueChange = { newProfileDraft = newProfileDraft.copy(baseUrl = it) },
+                        onValueChange = {
+                            newProfileDraft = newProfileDraft.copy(baseUrl = it)
+                            onResetCreateProfileTest()
+                        },
                         modifier = Modifier.fillMaxWidth().testTag("settings_new_profile_base_url"),
                         label = { Text(stringResource(R.string.relay_address)) },
                     )
                     OutlinedTextField(
                         value = newProfileDraft.apiKey,
-                        onValueChange = { newProfileDraft = newProfileDraft.copy(apiKey = it) },
+                        onValueChange = {
+                            newProfileDraft = newProfileDraft.copy(apiKey = it)
+                            onResetCreateProfileTest()
+                        },
                         modifier = Modifier.fillMaxWidth().testTag("settings_new_profile_api_key"),
                         label = { Text(stringResource(R.string.upstream_api_key)) },
+                    )
+                    CreateProfileTestSummary(
+                        state = createProfileTestState,
                     )
                 }
             },
         )
+    }
+
+    if (showCreateProfileTestConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showCreateProfileTestConfirmation = false },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("settings_create_profile_test_confirm"),
+                    onClick = {
+                        showCreateProfileTestConfirmation = false
+                        onTestCreateProfileDraft(newProfileDraft)
+                    },
+                ) {
+                    Text(stringResource(R.string.profile_test_begin_confirm_action))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateProfileTestConfirmation = false }) {
+                    Text(stringResource(R.string.cancel_action))
+                }
+            },
+            title = { Text(stringResource(R.string.profile_test_dialog_title)) },
+            text = { Text(stringResource(R.string.profile_test_dialog_message)) },
+        )
+    }
+}
+
+@Composable
+private fun CreateProfileTestSummary(
+    state: CreateProfileTestState,
+) {
+    if (state.status == CreateProfileTestStatus.IDLE) return
+    val context = LocalContext.current
+    val nowMillis by produceState(
+        initialValue = System.currentTimeMillis(),
+        key1 = state.status,
+        key2 = state.startedAtMillis,
+    ) {
+        value = System.currentTimeMillis()
+        while (state.isRunning && state.startedAtMillis != null) {
+            delay(1_000)
+            value = System.currentTimeMillis()
+        }
+    }
+    val elapsedSeconds =
+        state.startedAtMillis?.let { startedAtMillis ->
+            ((nowMillis - startedAtMillis).coerceAtLeast(0L) / 1_000L).toInt()
+        } ?: 0
+
+    Column(
+        modifier = Modifier.fillMaxWidth().testTag("settings_create_profile_test_summary"),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = stringResource(R.string.profile_test_progress_value, state.testedCount, state.totalCount, elapsedSeconds),
+            modifier = Modifier.testTag("settings_create_profile_test_progress"),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        state.recommendedCombination?.let { combination ->
+            Text(
+                text = stringResource(
+                    R.string.profile_test_recommended_value,
+                    profileTestCombinationLabel(context, combination),
+                ),
+                modifier = Modifier.testTag("settings_create_profile_test_recommended"),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+        state.results.forEachIndexed { index, result ->
+            val color = if (result.success) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+            Text(
+                text = "${index + 1}. ${result.message}",
+                style = MaterialTheme.typography.bodySmall,
+                color = color,
+            )
+        }
     }
 }
 
@@ -459,6 +586,8 @@ private fun ProfileCard(
     onDuplicateProfile: (String) -> Unit,
     onDeleteProfile: (String) -> Unit,
     onMoveProfile: (String, Int) -> Unit,
+    connectionTestState: ProfileConnectionTestState?,
+    onTestProfileConnection: (String) -> Unit,
 ) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val isActive = profile.id == settings.activeProfileId
@@ -535,6 +664,44 @@ private fun ProfileCard(
                     Text(stringResource(R.string.profile_duplicate_action))
                 }
             }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                OutlinedButton(
+                    modifier = Modifier.testTag("settings_test_profile_${profile.id}"),
+                    enabled = connectionTestState !is ProfileConnectionTestState.Testing,
+                    onClick = { onTestProfileConnection(profile.id) },
+                ) {
+                    Text(
+                        stringResource(
+                            if (connectionTestState is ProfileConnectionTestState.Testing) {
+                                R.string.profile_testing_connection_action
+                            } else {
+                                R.string.profile_test_connection_action
+                            },
+                        ),
+                    )
+                }
+                when (connectionTestState) {
+                    is ProfileConnectionTestState.Success ->
+                        Text(
+                            text = connectionTestState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    is ProfileConnectionTestState.Error ->
+                        Text(
+                            text = connectionTestState.message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    ProfileConnectionTestState.Testing,
+                    null,
+                    -> Unit
+                }
+            }
             if (expanded) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 ProfileEditor(
@@ -587,6 +754,7 @@ private fun ProfileCard(
             onDismissRequest = { showDeleteConfirm = false },
             confirmButton = {
                 TextButton(
+                    modifier = Modifier.testTag("settings_delete_profile_confirm"),
                     onClick = {
                         showDeleteConfirm = false
                         onDeleteProfile(profile.id)

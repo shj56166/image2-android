@@ -69,6 +69,9 @@ internal fun createDefaultProfile(
     name: String,
     baseUrl: String = DEFAULT_OPENAI_BASE_URL,
     apiKey: String = "",
+    apiMode: ApiMode = ApiMode.IMAGES,
+    codexCliLikeMode: Boolean = false,
+    responseFormatB64Json: Boolean = false,
     id: String = UUID.randomUUID().toString(),
 ): ApiProfile =
     ApiProfile(
@@ -77,9 +80,11 @@ internal fun createDefaultProfile(
         provider = "openai",
         baseUrl = baseUrl,
         apiKey = apiKey,
-        model = IMAGES_API_DEFAULT_MODEL,
-        apiMode = ApiMode.IMAGES,
+        model = if (apiMode == ApiMode.RESPONSES) DEFAULT_RESPONSES_MODEL else IMAGES_API_DEFAULT_MODEL,
+        apiMode = apiMode,
         timeoutSec = DEFAULT_TIMEOUT_SEC,
+        codexCliLikeMode = codexCliLikeMode,
+        responseFormatB64Json = responseFormatB64Json,
     )
 
 internal fun copyApiProfile(

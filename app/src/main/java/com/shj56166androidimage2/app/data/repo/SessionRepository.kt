@@ -15,6 +15,9 @@ class SessionRepository(
     fun observeSessions(): Flow<List<ImageSession>> =
         sessionDao.observeAll().map { list -> list.map { it.toModel() } }
 
+    suspend fun getSession(sessionId: String): ImageSession? =
+        sessionDao.getById(sessionId)?.toModel()
+
     suspend fun getTurns(sessionId: String): List<SessionTurn> =
         turnDao.getForSession(sessionId).map { it.toModel() }
 

@@ -284,9 +284,13 @@ fun ImagePlaygroundRoot(viewModel: MainViewModel) {
                             onReuse = { viewModel.reuseTask(task) },
                             onEditOutputs = { viewModel.editOutputs(task) },
                             onToggleFavorite = { viewModel.toggleFavorite(task) },
+                            onRetry = { viewModel.retryTask(task) },
                             onDelete = { viewModel.deleteTask(task) },
                             onSaveImage = viewModel::saveOutputImage,
+                            onShareImage = { imageId -> viewModel.shareOutputImage(task, imageId) },
                             onSaveAllImages = { viewModel.saveTaskOutputImages(task) },
+                            onShareAllImages = { viewModel.shareTaskOutputImages(task) },
+                            showRetry = canShowTaskRetryAction(task, state.settings?.alwaysShowRetryButton == true),
                         )
                     } else {
                         Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
@@ -317,6 +321,9 @@ fun ImagePlaygroundRoot(viewModel: MainViewModel) {
                                 onDuplicateProfile = viewModel::duplicateProfile,
                                 onDeleteProfile = viewModel::deleteProfile,
                                 onMoveProfile = viewModel::moveProfile,
+                                onTestProfileConnection = viewModel::testProfileConnection,
+                                onTestCreateProfileDraft = viewModel::testCreateProfileDraft,
+                                onResetCreateProfileTest = viewModel::resetCreateProfileTestState,
                             )
 
                         SettingsSubpage.CUSTOM_PROVIDERS ->
@@ -376,7 +383,9 @@ fun ImagePlaygroundRoot(viewModel: MainViewModel) {
                                 padding = padding,
                                 onQueryChange = viewModel::updateQuery,
                                 onStatusFilterChange = viewModel::updateHistoryStatusFilter,
+                                onFavoritesOnlyChange = viewModel::updateFavoritesOnly,
                                 onOpenTask = viewModel::openTask,
+                                onRetryTask = viewModel::retryTask,
                                 onDeleteTask = viewModel::deleteTask,
                             )
 
@@ -1084,11 +1093,14 @@ private fun HistoryScreen(
     padding: PaddingValues,
     onQueryChange: (String) -> Unit,
     onStatusFilterChange: (HistoryStatusFilter) -> Unit,
+    onFavoritesOnlyChange: (Boolean) -> Unit,
     onOpenTask: (String) -> Unit,
+    onRetryTask: (ImageTask) -> Unit,
     onDeleteTask: (ImageTask) -> Unit,
 ) {
     var pendingDeleteTask by remember { mutableStateOf<ImageTask?>(null) }
     val nowMillis = rememberElapsedTicker()
+    val showRetryActions = state.settings?.alwaysShowRetryButton == true
 
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -1118,6 +1130,11 @@ private fun HistoryScreen(
                                 label = { Text(historyStatusFilterLabel(filter)) },
                             )
                         }
+                        FilterChip(
+                            selected = state.favoritesOnly,
+                            onClick = { onFavoritesOnlyChange(!state.favoritesOnly) },
+                            label = { Text(stringResource(R.string.history_filter_favorites)) },
+                        )
                     }
                 }
             }
@@ -1134,6 +1151,15 @@ private fun HistoryScreen(
                         modifier = Modifier.fillMaxWidth(),
                     )
                     DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                        if (canShowTaskRetryAction(task, showRetryActions)) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.retry_action)) },
+                                onClick = {
+                                    showMenu = false
+                                    onRetryTask(task)
+                                },
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.delete_action)) },
                             onClick = {
@@ -1285,9 +1311,13 @@ private fun TaskDetailScreen(
     onReuse: () -> Unit,
     onEditOutputs: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onRetry: () -> Unit,
     onDelete: () -> Unit,
     onSaveImage: (String) -> Unit,
+    onShareImage: (String) -> Unit,
     onSaveAllImages: () -> Unit,
+    onShareAllImages: () -> Unit,
+    showRetry: Boolean,
 ) {
     var previewIndex by rememberSaveable(task.id) { mutableStateOf<Int?>(null) }
     var detailImageId by rememberSaveable(task.id) { mutableStateOf<String?>(null) }
@@ -1309,12 +1339,21 @@ private fun TaskDetailScreen(
             }
             if (outputImages.size > 1) {
                 item {
-                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    ) {
                         OutlinedButton(
                             onClick = onSaveAllImages,
                             enabled = outputImages.any { it.exists },
                         ) {
                             Text(stringResource(R.string.save_all_images_action))
+                        }
+                        OutlinedButton(
+                            onClick = onShareAllImages,
+                            enabled = outputImages.any { it.exists },
+                        ) {
+                            Text(stringResource(R.string.share_all_images_action))
                         }
                     }
                 }
@@ -1357,16 +1396,34 @@ private fun TaskDetailScreen(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                             ) {
-                                OutlinedButton(
+                                IconButton(
+                                    modifier = Modifier.testTag("output_view_parameters_${image.imageId}"),
                                     onClick = { detailImageId = image.imageId },
                                 ) {
-                                    Text(stringResource(R.string.view_image_parameters_action))
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_info),
+                                        contentDescription = stringResource(R.string.view_image_parameters_action),
+                                    )
                                 }
-                                OutlinedButton(
+                                IconButton(
+                                    modifier = Modifier.testTag("output_save_image_${image.imageId}"),
                                     onClick = { onSaveImage(image.imageId) },
                                     enabled = image.exists,
                                 ) {
-                                    Text(stringResource(R.string.save_image_action))
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_save),
+                                        contentDescription = stringResource(R.string.save_image_action),
+                                    )
+                                }
+                                IconButton(
+                                    modifier = Modifier.testTag("output_share_image_${image.imageId}"),
+                                    onClick = { onShareImage(image.imageId) },
+                                    enabled = image.exists,
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_share),
+                                        contentDescription = stringResource(R.string.share_image_action),
+                                    )
                                 }
                             }
                         }
@@ -1431,17 +1488,51 @@ private fun TaskDetailScreen(
                 }
             }
             item {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onReuse) { Text(stringResource(R.string.reuse_action)) }
-                    Button(onClick = onEditOutputs) { Text(stringResource(R.string.edit_action)) }
-                    OutlinedButton(onClick = onToggleFavorite) {
-                        Text(
-                            stringResource(
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        modifier = Modifier.testTag("task_detail_reuse_prompt"),
+                        onClick = onReuse,
+                    ) { Text(stringResource(R.string.reuse_prompt_action)) }
+                    Button(
+                        modifier = Modifier.testTag("task_detail_continue_edit"),
+                        onClick = onEditOutputs,
+                    ) { Text(stringResource(R.string.continue_edit_action)) }
+                    IconButton(
+                        modifier = Modifier.testTag("task_detail_toggle_favorite"),
+                        onClick = onToggleFavorite,
+                    ) {
+                        Icon(
+                            painter = painterResource(
+                                if (task.isFavorite) R.drawable.ic_star_off else R.drawable.ic_star
+                            ),
+                            contentDescription = stringResource(
                                 if (task.isFavorite) R.string.unfavorite_action else R.string.favorite_action
-                            )
+                            ),
                         )
                     }
-                    OutlinedButton(onClick = onDelete) { Text(stringResource(R.string.delete_action)) }
+                    if (showRetry) {
+                        IconButton(
+                            modifier = Modifier.testTag("task_detail_retry"),
+                            onClick = onRetry,
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_retry),
+                                contentDescription = stringResource(R.string.retry_action),
+                            )
+                        }
+                    }
+                    IconButton(
+                        modifier = Modifier.testTag("task_detail_delete"),
+                        onClick = onDelete,
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_delete),
+                            contentDescription = stringResource(R.string.delete_action),
+                        )
+                    }
                 }
             }
         }

@@ -22,9 +22,13 @@ class EngineFactory(context: Context) {
             level = HttpLoggingInterceptor.Level.BASIC
         })
         .build()
-
-    fun create(): ImageExecutionEngine = DirectUpstreamExecutionEngine(
+    private val imageExecutionEngine = DirectUpstreamExecutionEngine(
         client = client,
         appContext = appContext,
     )
+    private val profileConnectionTester = ProfileConnectionTester(appContext, imageExecutionEngine)
+
+    fun create(): ImageExecutionEngine = imageExecutionEngine
+
+    fun connectionTester(): ProfileConnectionTester = profileConnectionTester
 }

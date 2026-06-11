@@ -5,6 +5,7 @@ import androidx.room.Room
 import com.shj56166androidimage2.app.data.db.AppDatabase
 import com.shj56166androidimage2.app.data.network.EngineFactory
 import com.shj56166androidimage2.app.domain.engine.ImageExecutionEngine
+import com.shj56166androidimage2.app.data.network.ProfileConnectionTester
 
 class AppContainer(context: Context) {
     val appContext = context.applicationContext
@@ -23,4 +24,6 @@ class AppContainer(context: Context) {
     val engineFactory = EngineFactory(appContext)
 
     fun imageExecutionEngine(): ImageExecutionEngine = engineFactory.create()
+
+    fun profileConnectionTester(): ProfileConnectionTester = engineFactory.connectionTester()
 }

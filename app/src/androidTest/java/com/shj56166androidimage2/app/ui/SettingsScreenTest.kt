@@ -4,9 +4,14 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.shj56166androidimage2.app.data.model.ApiMode
@@ -15,9 +20,16 @@ import com.shj56166androidimage2.app.data.model.AppSettingsState
 import com.shj56166androidimage2.app.data.model.CustomProviderDefinition
 import com.shj56166androidimage2.app.data.model.CustomProviderResultMapping
 import com.shj56166androidimage2.app.data.model.CustomProviderSubmitMapping
+import com.shj56166androidimage2.app.ui.screens.CreateProfileDraft
+import com.shj56166androidimage2.app.ui.screens.CreateProfileTestState
+import com.shj56166androidimage2.app.ui.screens.CreateProfileTestStatus
+import com.shj56166androidimage2.app.ui.screens.ProfileTestCaseResult
+import com.shj56166androidimage2.app.ui.screens.ProfileTestCombination
 import com.shj56166androidimage2.app.ui.screens.SettingsCustomProvidersScreen
 import com.shj56166androidimage2.app.ui.screens.SettingsProfilesScreen
 import com.shj56166androidimage2.app.ui.screens.SettingsScreen
+import com.shj56166androidimage2.app.ui.screens.createDefaultProfile
+import com.shj56166androidimage2.app.ui.screens.nextDefaultProfileName
 import com.shj56166androidimage2.app.ui.theme.ImagePlaygroundTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -64,7 +76,7 @@ class SettingsScreenTest {
         composeRule.onNodeWithTag("settings_set_active_profile-2").performScrollTo().performClick()
         composeRule.onNodeWithTag("settings_duplicate_profile-1").performScrollTo().performClick()
         composeRule.onNodeWithTag("settings_delete_profile_profile-2").performScrollTo().performClick()
-        composeRule.onAllNodesWithText("删除").onLast().performClick()
+        composeRule.onNodeWithTag("settings_delete_profile_confirm").performClick()
         composeRule.onNodeWithTag("settings_new_profile").performClick()
         composeRule.onNodeWithTag("settings_new_profile_name").assertExists().performTextInput("Images Config")
         composeRule.onNodeWithTag("settings_new_profile_base_url").performTextInput("https://images.example.com/v1")
@@ -93,7 +105,6 @@ class SettingsScreenTest {
             onStateChange = { state = it },
         )
 
-        composeRule.onNodeWithText("还没有 API 配置").assertExists()
         composeRule.onNodeWithTag("settings_new_profile").performClick()
 
         composeRule.onNodeWithTag("settings_new_profile_name").assertExists()
@@ -128,6 +139,60 @@ class SettingsScreenTest {
             val settings = state.settings ?: error("Missing settings")
             assertEquals("默认配置1", settings.profiles[0].name)
             assertEquals("默认配置2", settings.profiles[1].name)
+        }
+    }
+
+    @Test
+    fun newProfileAvailabilityTestShowsProgressAndAppliesRecommendedConfig() {
+        var state by mutableStateOf(buildEmptySettingsState())
+        composeRule.setProfilesContent(
+            stateProvider = { state },
+            onStateChange = { state = it },
+            onTestDraft = { draft ->
+                state =
+                    state.copy(
+                        createProfileTestState =
+                            CreateProfileTestState(
+                                status = CreateProfileTestStatus.RUNNING,
+                                testedCount = 1,
+                                totalCount = 4,
+                            ),
+                    )
+                state =
+                    state.copy(
+                        createProfileTestState =
+                            CreateProfileTestState(
+                                status = CreateProfileTestStatus.FINISHED,
+                                testedCount = 4,
+                                totalCount = 4,
+                                results =
+                                    listOf(
+                                        ProfileTestCaseResult(
+                                            combination = ProfileTestCombination(ApiMode.IMAGES, false, false),
+                                            success = true,
+                                            message = "Images API / CLI Off / Base64 Off succeeded.",
+                                        ),
+                                    ),
+                                recommendedCombination = ProfileTestCombination(ApiMode.IMAGES, false, false),
+                            ),
+                    )
+            },
+        )
+
+        composeRule.onNodeWithTag("settings_new_profile").performClick()
+        composeRule.onNodeWithTag("settings_new_profile_base_url").performTextInput("https://images.example.com/v1")
+        composeRule.onNodeWithTag("settings_new_profile_api_key").performTextInput("secret-key-3")
+        composeRule.onNodeWithTag("settings_create_profile_test").performClick()
+        composeRule.onNodeWithTag("settings_create_profile_test_confirm").performClick()
+        composeRule.onNodeWithTag("settings_create_profile_test_progress").assertExists()
+        composeRule.onNodeWithTag("settings_create_profile_test_progress").assertExists()
+        composeRule.onNodeWithTag("settings_create_profile_confirm").performClick()
+
+        composeRule.runOnIdle {
+            val created = state.settings?.profiles?.first() ?: error("Missing created profile")
+            assertEquals(ApiMode.IMAGES, created.apiMode)
+            assertEquals(false, created.codexCliLikeMode)
+            assertEquals(false, created.responseFormatB64Json)
         }
     }
 
@@ -167,6 +232,7 @@ private fun ComposeContentTestRule.setSettingsHomeContent(
 private fun ComposeContentTestRule.setProfilesContent(
     stateProvider: () -> MainUiState,
     onStateChange: (MainUiState) -> Unit,
+    onTestDraft: (CreateProfileDraft) -> Unit = {},
 ) {
     setContent {
         val state = stateProvider()
@@ -175,10 +241,10 @@ private fun ComposeContentTestRule.setProfilesContent(
                 state = state,
                 padding = PaddingValues(0.dp),
                 onUpdateProfile = { profile ->
-                    val current = state.settings
+                    val current = stateProvider().settings
                     if (current != null) {
                         onStateChange(
-                            state.copy(
+                            stateProvider().copy(
                                 settings =
                                     current.copy(
                                         profiles = current.profiles.map { if (it.id == profile.id) profile else it },
@@ -188,15 +254,15 @@ private fun ComposeContentTestRule.setProfilesContent(
                     }
                 },
                 onSetActiveProfile = { profileId ->
-                    state.settings?.let { current ->
-                        onStateChange(state.copy(settings = current.copy(activeProfileId = profileId)))
+                    stateProvider().settings?.let { current ->
+                        onStateChange(stateProvider().copy(settings = current.copy(activeProfileId = profileId)))
                     }
                 },
                 onDuplicateProfile = { profileId ->
-                    state.settings?.let { current ->
+                    stateProvider().settings?.let { current ->
                         val source = current.profiles.first { it.id == profileId }
                         onStateChange(
-                            state.copy(
+                            stateProvider().copy(
                                 settings = current.copy(
                                     profiles = current.profiles + source.copy(id = "profile-copy", name = "${source.name} (Copy)"),
                                     activeProfileId = "profile-copy",
@@ -206,10 +272,10 @@ private fun ComposeContentTestRule.setProfilesContent(
                     }
                 },
                 onDeleteProfile = { profileId ->
-                    state.settings?.let { current ->
+                    stateProvider().settings?.let { current ->
                         val nextProfiles = current.profiles.filterNot { it.id == profileId }
                         onStateChange(
-                            state.copy(
+                            stateProvider().copy(
                                 settings = current.copy(
                                     profiles = nextProfiles,
                                     activeProfileId = if (current.activeProfileId == profileId) nextProfiles.first().id else current.activeProfileId,
@@ -219,30 +285,40 @@ private fun ComposeContentTestRule.setProfilesContent(
                     }
                 },
                 onMoveProfile = { _, _ -> },
-                onCreateProfile = { name, baseUrl, apiKey ->
-                    val current = state.settings
+                onCreateProfile = { draft ->
+                    val current = stateProvider().settings
                     if (current != null) {
                         val nextId = "profile-${current.profiles.size + 1}"
+                        val resolvedName =
+                            draft.name.ifBlank {
+                                nextDefaultProfileName(current, "默认配置")
+                            }
+                        val created =
+                            createDefaultProfile(
+                                name = resolvedName,
+                                baseUrl = draft.baseUrl,
+                                apiKey = draft.apiKey,
+                                apiMode = draft.apiMode,
+                                codexCliLikeMode = draft.codexCliLikeMode,
+                                responseFormatB64Json = draft.responseFormatB64Json,
+                                id = nextId,
+                            )
                         onStateChange(
-                            state.copy(
+                            stateProvider().copy(
                                 settings =
                                     current.copy(
-                                        profiles =
-                                            current.profiles +
-                                                ApiProfile(
-                                                    id = nextId,
-                                                    name = name,
-                                                    provider = "openai",
-                                                    baseUrl = baseUrl,
-                                                    apiKey = apiKey,
-                                                    model = "gpt-image-2",
-                                                    apiMode = ApiMode.IMAGES,
-                                                ),
+                                        profiles = current.profiles + created,
                                         activeProfileId = nextId,
                                     ),
+                                createProfileTestState = CreateProfileTestState(),
                             ),
                         )
                     }
+                },
+                onTestProfileConnection = {},
+                onTestCreateProfileDraft = onTestDraft,
+                onResetCreateProfileTest = {
+                    onStateChange(stateProvider().copy(createProfileTestState = CreateProfileTestState()))
                 },
             )
         }

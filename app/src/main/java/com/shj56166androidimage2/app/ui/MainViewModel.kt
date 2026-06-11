@@ -1,6 +1,8 @@
 package com.shj56166androidimage2.app.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -12,6 +14,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.shj56166androidimage2.app.R
+import com.shj56166androidimage2.app.data.network.ProfileConnectionTestResult
 import com.shj56166androidimage2.app.data.model.ApiProfile
 import com.shj56166androidimage2.app.data.model.AppSettingsState
 import com.shj56166androidimage2.app.data.model.CustomProviderDefinition
@@ -24,6 +27,8 @@ import com.shj56166androidimage2.app.data.model.TaskParams
 import com.shj56166androidimage2.app.data.model.TaskStatus
 import com.shj56166androidimage2.app.data.repo.AppContainer
 import com.shj56166androidimage2.app.data.repo.AppJson
+import com.shj56166androidimage2.app.ui.screens.CreateProfileDraft
+import com.shj56166androidimage2.app.ui.screens.CreateProfileTestState
 import com.shj56166androidimage2.app.ui.screens.createDefaultProfile
 import com.shj56166androidimage2.app.ui.screens.deleteProfileFromSettings
 import com.shj56166androidimage2.app.ui.screens.copyApiProfile
@@ -33,12 +38,12 @@ import com.shj56166androidimage2.app.ui.screens.removeCustomProviderFromSettings
 import com.shj56166androidimage2.app.util.applyAppLanguagePreference
 import com.shj56166androidimage2.app.worker.ImageTaskWorker
 import com.shj56166androidimage2.app.worker.cancelledActiveTaskUpdate
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
-import java.io.ByteArrayOutputStream
-import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -47,6 +52,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
@@ -99,6 +105,18 @@ data class UiMessage(
     val message: String,
 )
 
+sealed interface ProfileConnectionTestState {
+    object Testing : ProfileConnectionTestState
+
+    data class Success(
+        val message: String,
+    ) : ProfileConnectionTestState
+
+    data class Error(
+        val message: String,
+    ) : ProfileConnectionTestState
+}
+
 data class MainUiState(
     val loading: Boolean = false,
     val tab: HomeTab = HomeTab.CREATE,
@@ -115,6 +133,9 @@ data class MainUiState(
     val settingsSubpage: SettingsSubpage? = null,
     val query: String = "",
     val historyStatusFilter: HistoryStatusFilter = HistoryStatusFilter.ALL,
+    val favoritesOnly: Boolean = false,
+    val profileConnectionStates: Map<String, ProfileConnectionTestState> = emptyMap(),
+    val createProfileTestState: CreateProfileTestState = CreateProfileTestState(),
     val errorMessage: String? = null,
     val infoMessage: UiMessage? = null,
 )
@@ -139,6 +160,10 @@ class MainViewModel(
     private val infoMessage = MutableStateFlow<UiMessage?>(null)
     private val query = MutableStateFlow("")
     private val historyStatusFilter = MutableStateFlow(HistoryStatusFilter.ALL)
+    private val favoritesOnly = MutableStateFlow(false)
+    private val profileConnectionStates = MutableStateFlow<Map<String, ProfileConnectionTestState>>(emptyMap())
+    private val createProfileTestState = MutableStateFlow(CreateProfileTestState())
+    private var createProfileTestJob: Job? = null
     private val selectedTask =
         selectedTaskId.flatMapLatest { taskId ->
             if (taskId == null) flowOf(null) else container.taskRepository.observeById(taskId)
@@ -158,6 +183,9 @@ class MainViewModel(
         settingsSubpage,
         query,
         historyStatusFilter,
+        favoritesOnly,
+        profileConnectionStates,
+        createProfileTestState,
         errorMessage,
         infoMessage,
     ) { values ->
@@ -174,19 +202,13 @@ class MainViewModel(
         val currentSettingsSubpage = values[10] as SettingsSubpage?
         val currentQuery = values[11] as String
         val currentHistoryStatusFilter = values[12] as HistoryStatusFilter
-        val error = values[13] as String?
-        val info = values[14] as UiMessage?
+        val currentFavoritesOnly = values[13] as Boolean
+        val currentProfileConnectionStates = values[14] as Map<String, ProfileConnectionTestState>
+        val currentCreateProfileTestState = values[15] as CreateProfileTestState
+        val error = values[16] as String?
+        val info = values[17] as UiMessage?
         val tasksById = tasks.associateBy { it.id }
-        val queryTrimmed = currentQuery.trim()
-        val queryFilteredTasks =
-            if (queryTrimmed.isBlank()) {
-                tasks
-            } else {
-                tasks.filter { task -> task.matchesHistoryQuery(queryTrimmed) }
-            }
-        val filteredTasks = queryFilteredTasks.filter { task ->
-            currentHistoryStatusFilter.matches(task.status)
-        }
+        val filteredTasks = filterHistoryTasks(tasks, currentQuery, currentHistoryStatusFilter, currentFavoritesOnly)
         val createPreviewTasks = previewTaskIds.mapNotNull(tasksById::get)
         MainUiState(
             settings = settings,
@@ -203,6 +225,9 @@ class MainViewModel(
             settingsSubpage = currentSettingsSubpage,
             query = currentQuery,
             historyStatusFilter = currentHistoryStatusFilter,
+            favoritesOnly = currentFavoritesOnly,
+            profileConnectionStates = currentProfileConnectionStates,
+            createProfileTestState = currentCreateProfileTestState,
             errorMessage = error,
             infoMessage = info,
         )
@@ -251,6 +276,10 @@ class MainViewModel(
 
     fun updateHistoryStatusFilter(value: HistoryStatusFilter) {
         historyStatusFilter.value = value
+    }
+
+    fun updateFavoritesOnly(value: Boolean) {
+        favoritesOnly.value = value
     }
 
     fun updateParams(transform: (TaskParams) -> TaskParams) {
@@ -397,33 +426,17 @@ class MainViewModel(
                 currentComposer.selectedImageIds.orderMaskTargetFirst(it.targetImageId)
             } ?: currentComposer.selectedImageIds
             val sessionId = composer.value.currentSessionId ?: UUID.randomUUID().toString()
-            val task = ImageTask(
-                id = UUID.randomUUID().toString(),
+            val task = buildSubmittedTask(
+                profile = profile,
                 prompt = prompt,
                 params = currentComposer.params,
                 sessionId = sessionId,
-                apiProvider = profile.provider,
-                apiProfileId = profile.id,
-                apiProfileName = profile.name,
-                apiModel = profile.model,
                 inputImageIds = orderedInputImageIds,
-                maskTargetImageId = maskDraft?.targetImageId,
-                maskImageId = maskDraft?.maskImageId,
-                status = TaskStatus.RUNNING,
+                maskDraft = maskDraft,
+                taskId = UUID.randomUUID().toString(),
                 createdAt = System.currentTimeMillis(),
             )
-            container.taskRepository.upsert(task)
-            rememberCreatePreviewTask(task.id)
-            container.sessionRepository.upsertSession(
-                ImageSession(
-                    id = sessionId,
-                    name = currentComposer.currentSessionName.ifBlank {
-                        getApplication<Application>().getString(R.string.default_session_name)
-                    },
-                    updatedAt = System.currentTimeMillis(),
-                ),
-            )
-            ImageTaskWorker.enqueue(getApplication(), task.id)
+            enqueueTask(task, currentComposer.currentSessionName)
             composer.update {
                 it.copy(
                     prompt = "",
@@ -488,6 +501,21 @@ class MainViewModel(
         }
     }
 
+    fun retryTask(task: ImageTask) {
+        viewModelScope.launch {
+            val sessionId = task.sessionId ?: UUID.randomUUID().toString()
+            val retryTask = buildRetryTask(
+                task,
+                newTaskId = UUID.randomUUID().toString(),
+                createdAt = System.currentTimeMillis(),
+                sessionId = sessionId,
+            )
+            val sessionName = resolveSessionName(retryTask.sessionId)
+            enqueueTask(retryTask, sessionName)
+            selectedTaskId.value = retryTask.id
+        }
+    }
+
     fun deleteTask(task: ImageTask) {
         viewModelScope.launch {
             container.taskRepository.deleteById(task.id)
@@ -530,6 +558,74 @@ class MainViewModel(
         }
     }
 
+    fun shareOutputImage(task: ImageTask, imageId: String) {
+        viewModelScope.launch {
+            runCatching {
+                val image = container.imageStorageRepository.getShareableImage(imageId)
+                val intent = Intent(Intent.ACTION_SEND).apply {
+                    type = image.mimeType
+                    putExtra(Intent.EXTRA_STREAM, image.uri)
+                    putExtra(Intent.EXTRA_TEXT, buildTaskShareText(task, imageCount = 1))
+                    clipData = ClipData.newRawUri(task.prompt, image.uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                launchShareChooser(intent, getApplication<Application>().getString(R.string.share_image_action))
+            }.onFailure { errorMessage.value = it.message ?: it.toString() }
+        }
+    }
+
+    fun shareTaskOutputImages(task: ImageTask) {
+        viewModelScope.launch {
+            runCatching {
+                val shareableImages = task.outputImageIds.map { imageId ->
+                    container.imageStorageRepository.getShareableImage(imageId)
+                }
+                if (shareableImages.isEmpty()) {
+                    error(getApplication<Application>().getString(R.string.no_images_shared_error))
+                }
+                val imageUris = ArrayList(shareableImages.map { it.uri })
+                val shareMimeType = shareableImages.map { it.mimeType }.distinct().singleOrNull() ?: "*/*"
+                val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = shareMimeType
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, imageUris)
+                    putExtra(Intent.EXTRA_TEXT, buildTaskShareText(task, imageCount = shareableImages.size))
+                    clipData = buildShareClipData(task.prompt, imageUris)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+                launchShareChooser(intent, getApplication<Application>().getString(R.string.share_all_images_action))
+            }.onFailure { errorMessage.value = it.message ?: it.toString() }
+        }
+    }
+
+    fun testProfileConnection(profileId: String) {
+        val profile = uiState.value.settings?.profiles?.firstOrNull { it.id == profileId } ?: return
+        profileConnectionStates.update { it + (profileId to ProfileConnectionTestState.Testing) }
+        viewModelScope.launch {
+            val nextState =
+                when (val result = container.profileConnectionTester().test(profile)) {
+                    is ProfileConnectionTestResult.Success -> ProfileConnectionTestState.Success(result.message)
+                    is ProfileConnectionTestResult.Error -> ProfileConnectionTestState.Error(result.message)
+                }
+            profileConnectionStates.update { states -> states + (profileId to nextState) }
+        }
+    }
+
+    fun testCreateProfileDraft(draft: CreateProfileDraft) {
+        createProfileTestJob?.cancel()
+        createProfileTestJob =
+            viewModelScope.launch {
+                container.profileConnectionTester().testDraft(draft) { state ->
+                    createProfileTestState.value = state
+                }
+            }
+    }
+
+    fun resetCreateProfileTestState() {
+        createProfileTestJob?.cancel()
+        createProfileTestJob = null
+        createProfileTestState.value = CreateProfileTestState()
+    }
+
     fun saveSettings(settings: AppSettingsState) {
         settingsState.value = settings
         applyAppLanguagePreference(settings.appLanguage)
@@ -557,16 +653,20 @@ class MainViewModel(
         }
     }
 
-    fun createProfile(name: String, baseUrl: String, apiKey: String) {
+    fun createProfile(draft: CreateProfileDraft) {
         val current = uiState.value.settings ?: return
         val app = getApplication<Application>()
         val newProfile = createDefaultProfile(
-            name = name.trim().ifBlank {
+            name = draft.name.trim().ifBlank {
                 nextDefaultProfileName(current, app.getString(R.string.default_profile_name_prefix))
             },
-            baseUrl = baseUrl.trim(),
-            apiKey = apiKey.trim(),
+            baseUrl = draft.baseUrl.trim(),
+            apiKey = draft.apiKey.trim(),
+            apiMode = draft.apiMode,
+            codexCliLikeMode = draft.codexCliLikeMode,
+            responseFormatB64Json = draft.responseFormatB64Json,
         )
+        resetCreateProfileTestState()
         saveSettings(
             current.copy(
                 activeProfileId = newProfile.id,
@@ -604,6 +704,7 @@ class MainViewModel(
 
     fun deleteProfile(profileId: String) {
         val current = uiState.value.settings ?: return
+        profileConnectionStates.update { states -> states - profileId }
         saveSettings(deleteProfileFromSettings(current, profileId))
     }
 
@@ -773,6 +874,47 @@ class MainViewModel(
         }
     }
 
+    private suspend fun enqueueTask(task: ImageTask, sessionName: String) {
+        val sessionId = task.sessionId ?: error("Task session ID is required.")
+        container.taskRepository.upsert(task)
+        rememberCreatePreviewTask(task.id)
+        container.sessionRepository.upsertSession(
+            ImageSession(
+                id = sessionId,
+                name = sessionName,
+                updatedAt = System.currentTimeMillis(),
+            ),
+        )
+        ImageTaskWorker.enqueue(getApplication(), task.id)
+    }
+
+    private suspend fun resolveSessionName(sessionId: String?): String {
+        val defaultSessionName = getApplication<Application>().getString(R.string.default_session_name)
+        if (sessionId.isNullOrBlank()) return defaultSessionName
+        return container.sessionRepository.getSession(sessionId)?.name ?: defaultSessionName
+    }
+
+    private fun launchShareChooser(intent: Intent, title: String) {
+        val chooser = Intent.createChooser(intent, title).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        getApplication<Application>().startActivity(chooser)
+    }
+
+    private fun buildTaskShareText(task: ImageTask, imageCount: Int): String {
+        val app = getApplication<Application>()
+        return listOf(
+            task.prompt,
+            "${app.getString(R.string.provider_label)}: ${task.apiProfileName ?: task.apiProvider}",
+            "${app.getString(R.string.model_label)}: ${task.apiModel ?: app.getString(R.string.not_set_value)}",
+            "${app.getString(R.string.size_label)}: ${task.params.size}",
+            "${app.getString(R.string.quality_label)}: ${task.params.quality}",
+            "${app.getString(R.string.format_label)}: ${task.params.outputFormat.uppercase()}",
+            "${app.getString(R.string.count_label)}: $imageCount",
+            formatElapsedShareLine(task, app),
+        ).filter { it.isNotBlank() }.joinToString(separator = "\n")
+    }
+
     private fun rememberCreatePreviewTask(taskId: String) {
         createPreviewTaskIds.update { previewTaskIds ->
             (listOf(taskId) + previewTaskIds.filterNot { it == taskId }).take(CREATE_PREVIEW_LIMIT)
@@ -829,14 +971,99 @@ private fun HistoryStatusFilter.matches(status: TaskStatus): Boolean =
         HistoryStatusFilter.ERROR -> status == TaskStatus.ERROR
     }
 
+internal fun filterHistoryTasks(
+    tasks: List<ImageTask>,
+    query: String,
+    statusFilter: HistoryStatusFilter,
+    favoritesOnly: Boolean,
+): List<ImageTask> {
+    val queryTrimmed = query.trim()
+    return tasks.filter { task ->
+        (!favoritesOnly || task.isFavorite) &&
+            statusFilter.matches(task.status) &&
+            (queryTrimmed.isBlank() || task.matchesHistoryQuery(queryTrimmed))
+    }
+}
+
 private fun ImageTask.matchesHistoryQuery(query: String): Boolean =
     prompt.contains(query, ignoreCase = true) ||
         params.size.contains(query, ignoreCase = true) ||
         (apiProfileName?.contains(query, ignoreCase = true) == true) ||
         (apiModel?.contains(query, ignoreCase = true) == true)
 
+internal fun canShowTaskRetryAction(task: ImageTask, alwaysShowRetryButton: Boolean): Boolean =
+    when (task.status) {
+        TaskStatus.ERROR -> true
+        TaskStatus.DONE -> alwaysShowRetryButton
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
+        -> false
+    }
+
+internal fun buildSubmittedTask(
+    profile: ApiProfile,
+    prompt: String,
+    params: TaskParams,
+    sessionId: String,
+    inputImageIds: List<String>,
+    maskDraft: MaskDraft?,
+    taskId: String,
+    createdAt: Long,
+): ImageTask =
+    ImageTask(
+        id = taskId,
+        prompt = prompt,
+        params = params,
+        sessionId = sessionId,
+        apiProvider = profile.provider,
+        apiProfileId = profile.id,
+        apiProfileName = profile.name,
+        apiModel = profile.model,
+        inputImageIds = inputImageIds,
+        maskTargetImageId = maskDraft?.targetImageId,
+        maskImageId = maskDraft?.maskImageId,
+        status = TaskStatus.RUNNING,
+        createdAt = createdAt,
+    )
+
+internal fun buildRetryTask(
+    task: ImageTask,
+    newTaskId: String,
+    createdAt: Long,
+    sessionId: String,
+): ImageTask =
+    task.copy(
+        id = newTaskId,
+        sessionId = sessionId,
+        remoteTaskId = null,
+        outputImageIds = emptyList(),
+        rawImageUrls = emptyList(),
+        rawResponsePayload = null,
+        actualParamsByImage = emptyMap(),
+        revisedPromptByImage = emptyMap(),
+        status = TaskStatus.RUNNING,
+        error = null,
+        createdAt = createdAt,
+        finishedAt = null,
+        elapsedMillis = null,
+        isFavorite = false,
+    )
+
 internal fun hasActiveTasks(tasks: List<ImageTask>): Boolean =
     tasks.any { it.status == TaskStatus.QUEUED || it.status == TaskStatus.RUNNING }
+
+private fun buildShareClipData(label: String, uris: List<Uri>): ClipData? {
+    val firstUri = uris.firstOrNull() ?: return null
+    return ClipData.newRawUri(label, firstUri).apply {
+        uris.drop(1).forEach { uri -> addItem(ClipData.Item(uri)) }
+    }
+}
+
+private fun formatElapsedShareLine(task: ImageTask, application: Application): String =
+    task.elapsedMillis?.let { elapsedMillis ->
+        val seconds = (elapsedMillis / 1_000L).coerceAtLeast(0L)
+        "${application.getString(R.string.elapsed_time_label)}: ${seconds}s"
+    }.orEmpty()
 
 private fun decodeCustomProviderImport(text: String): CustomProviderImportPayload {
     val element = AppJson.parseToJsonElement(text)
